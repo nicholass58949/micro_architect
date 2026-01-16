@@ -1,0 +1,86 @@
+# Git ignore file for NPU Microarchitecture Project
+
+# Simulation outputs
+sim_output/
+*.vcd
+*.vvp
+*.fst
+*.ghw
+*.log
+
+# Waveform files
+*.vcd
+*.vpd
+*.shm
+*.trn
+*.dsn
+
+# Compilation outputs
+*.o
+*.so
+*.a
+*.out
+work/
+*.wlf
+transcript
+
+# Vivado
+*.jou
+*.log
+*.pb
+*.dcp
+*.bit
+*.bin
+.Xil/
+vivado*.str
+vivado*.zip
+
+# Quartus
+*.qpf
+*.qsf
+*.sof
+*.pof
+db/
+incremental_db/
+output_files/
+
+# ModelSim
+work/
+*.mpf
+*.mti
+vsim.wlf
+transcript
+
+# Temporary files
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+
+# Backup files
+*.bak
+*.backup
+*_backup
+
+# OS files
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
