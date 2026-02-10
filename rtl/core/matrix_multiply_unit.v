@@ -1,286 +1,104 @@
 // =============================================================================
 // 文件名: matrix_multiply_unit.v
-// 功能: 矩阵乘法单元 - NPU的核心计算引擎
-// 描述: 使用PE阵列实现高效的矩阵乘法运算
+// 功能: 简化矩阵乘法单元 - 直接计算单次矩阵向量乘法
+// 描述: 输入一行向量与权重矩阵，输出一行结果
 // =============================================================================
 
-module matrix_multiply_unit #(
-    parameter DATA_WIDTH = 16,      // 数据位宽
-    parameter MATRIX_SIZE = 8,      // 矩阵维度（8x8）
-    parameter PE_ARRAY_SIZE = 8     // PE阵列大小
-)(
-    // 时钟和复位
-    input  wire                             clk,
-    input  wire                             rst_n,
-    
-    // 控制信号
-    input  wire                             start,          // 开始计算
-    input  wire                             clear,          // 清除累加器
-    output reg                              done,           // 计算完成
-    output reg                              busy,           // 忙标志
-    
-    // 输入数据接口（从输入缓存）
-    input  wire [DATA_WIDTH-1:0]            input_data [0:MATRIX_SIZE-1],
-    input  wire                             input_valid,
-    
-    // 权重数据接口（从权重缓存）
-    input  wire [DATA_WIDTH-1:0]            weight_data [0:MATRIX_SIZE-1][0:MATRIX_SIZE-1],
-    input  wire                             weight_valid,
-    
-    // 输出数据接口（到激活函数单元）
-    output reg  [2*DATA_WIDTH-1:0]          output_data [0:MATRIX_SIZE-1],
-    output reg                              output_valid
+module matrix_multiply_unit (
+    clk, rst_n, start, clear, done, busy,
+    input_data_0, input_data_1, input_data_2, input_data_3,
+    input_data_4, input_data_5, input_data_6, input_data_7,
+    input_valid,
+    weight_00, weight_01, weight_02, weight_03, weight_04, weight_05, weight_06, weight_07,
+    weight_10, weight_11, weight_12, weight_13, weight_14, weight_15, weight_16, weight_17,
+    weight_20, weight_21, weight_22, weight_23, weight_24, weight_25, weight_26, weight_27,
+    weight_30, weight_31, weight_32, weight_33, weight_34, weight_35, weight_36, weight_37,
+    weight_40, weight_41, weight_42, weight_43, weight_44, weight_45, weight_46, weight_47,
+    weight_50, weight_51, weight_52, weight_53, weight_54, weight_55, weight_56, weight_57,
+    weight_60, weight_61, weight_62, weight_63, weight_64, weight_65, weight_66, weight_67,
+    weight_70, weight_71, weight_72, weight_73, weight_74, weight_75, weight_76, weight_77,
+    weight_valid,
+    output_data_0, output_data_1, output_data_2, output_data_3,
+    output_data_4, output_data_5, output_data_6, output_data_7,
+    output_valid
 );
 
-    // =========================================================================
-    // 内部信号定义
-    // =========================================================================
+    input clk, rst_n, start, clear, input_valid, weight_valid;
+    input [15:0] input_data_0, input_data_1, input_data_2, input_data_3;
+    input [15:0] input_data_4, input_data_5, input_data_6, input_data_7;
     
-    // PE阵列信号
-    wire [DATA_WIDTH-1:0]       pe_data_in [0:PE_ARRAY_SIZE-1][0:PE_ARRAY_SIZE-1];
-    wire [DATA_WIDTH-1:0]       pe_data_out [0:PE_ARRAY_SIZE-1][0:PE_ARRAY_SIZE-1];
-    wire [DATA_WIDTH-1:0]       pe_weight_in [0:PE_ARRAY_SIZE-1][0:PE_ARRAY_SIZE-1];
-    wire [2*DATA_WIDTH-1:0]     pe_acc_out [0:PE_ARRAY_SIZE-1][0:PE_ARRAY_SIZE-1];
+    input [15:0] weight_00, weight_01, weight_02, weight_03, weight_04, weight_05, weight_06, weight_07;
+    input [15:0] weight_10, weight_11, weight_12, weight_13, weight_14, weight_15, weight_16, weight_17;
+    input [15:0] weight_20, weight_21, weight_22, weight_23, weight_24, weight_25, weight_26, weight_27;
+    input [15:0] weight_30, weight_31, weight_32, weight_33, weight_34, weight_35, weight_36, weight_37;
+    input [15:0] weight_40, weight_41, weight_42, weight_43, weight_44, weight_45, weight_46, weight_47;
+    input [15:0] weight_50, weight_51, weight_52, weight_53, weight_54, weight_55, weight_56, weight_57;
+    input [15:0] weight_60, weight_61, weight_62, weight_63, weight_64, weight_65, weight_66, weight_67;
+    input [15:0] weight_70, weight_71, weight_72, weight_73, weight_74, weight_75, weight_76, weight_77;
     
-    // 控制信号
-    reg                         pe_enable;
-    reg                         pe_clear_acc;
-    
-    // 状态机
-    localparam IDLE         = 3'b000;
-    localparam LOAD_DATA    = 3'b001;
-    localparam COMPUTE      = 3'b010;
-    localparam ACCUMULATE   = 3'b011;
-    localparam OUTPUT       = 3'b100;
-    
-    reg [2:0]                   state, next_state;
-    
-    // 计数器
-    reg [$clog2(MATRIX_SIZE+1)-1:0] row_cnt;
-    reg [$clog2(MATRIX_SIZE+1)-1:0] col_cnt;
-    reg [$clog2(MATRIX_SIZE+1)-1:0] compute_cnt;
-    
-    // 输入数据寄存器
-    reg [DATA_WIDTH-1:0]        input_reg [0:MATRIX_SIZE-1];
-    reg [DATA_WIDTH-1:0]        weight_reg [0:MATRIX_SIZE-1][0:MATRIX_SIZE-1];
-    
-    // =========================================================================
-    // PE阵列实例化
-    // =========================================================================
-    // 创建一个8x8的PE阵列，形成脉动阵列结构
-    
-    genvar i, j;
-    generate
-        for (i = 0; i < PE_ARRAY_SIZE; i = i + 1) begin : gen_pe_row
-            for (j = 0; j < PE_ARRAY_SIZE; j = j + 1) begin : gen_pe_col
-                processing_element #(
-                    .DATA_WIDTH(DATA_WIDTH)
-                ) pe_inst (
-                    .clk        (clk),
-                    .rst_n      (rst_n),
-                    .enable     (pe_enable),
-                    .clear_acc  (pe_clear_acc),
-                    .data_in    (pe_data_in[i][j]),
-                    .weight_in  (pe_weight_in[i][j]),
-                    .data_out   (pe_data_out[i][j]),
-                    .acc_out    (pe_acc_out[i][j])
-                );
-            end
-        end
-    endgenerate
-    
-    // =========================================================================
-    // PE阵列数据流连接
-    // =========================================================================
-    // 脉动阵列：数据从左到右流动，权重保持不变
-    
-    integer m, n;
-    
+    output reg done, busy, output_valid;
+    output reg [31:0] output_data_0, output_data_1, output_data_2, output_data_3;
+    output reg [31:0] output_data_4, output_data_5, output_data_6, output_data_7;
+
+    wire compute_fire;
+    integer i0, i1, i2, i3, i4, i5, i6, i7;
+
     always @(*) begin
-        // 默认值
-        for (m = 0; m < PE_ARRAY_SIZE; m = m + 1) begin
-            for (n = 0; n < PE_ARRAY_SIZE; n = n + 1) begin
-                pe_data_in[m][n] = {DATA_WIDTH{1'b0}};
-                pe_weight_in[m][n] = {DATA_WIDTH{1'b0}};
-            end
-        end
-        
-        // 连接数据流
-        if (state == COMPUTE) begin
-            // 第一列PE接收输入数据
-            for (m = 0; m < PE_ARRAY_SIZE; m = m + 1) begin
-                pe_data_in[m][0] = input_reg[m];
-            end
-            
-            // 其他PE接收前一个PE的输出
-            for (m = 0; m < PE_ARRAY_SIZE; m = m + 1) begin
-                for (n = 1; n < PE_ARRAY_SIZE; n = n + 1) begin
-                    pe_data_in[m][n] = pe_data_out[m][n-1];
-                end
-            end
-            
-            // 权重数据
-            for (m = 0; m < PE_ARRAY_SIZE; m = m + 1) begin
-                for (n = 0; n < PE_ARRAY_SIZE; n = n + 1) begin
-                    pe_weight_in[m][n] = weight_reg[m][n];
-                end
-            end
-        end
+        i0 = input_data_0;
+        i1 = input_data_1;
+        i2 = input_data_2;
+        i3 = input_data_3;
+        i4 = input_data_4;
+        i5 = input_data_5;
+        i6 = input_data_6;
+        i7 = input_data_7;
     end
-    
-    // =========================================================================
-    // 状态机 - 当前状态寄存器
-    // =========================================================================
-    
+
+    assign compute_fire = start && input_valid && weight_valid;
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state <= IDLE;
+            busy <= 0;
+            done <= 0;
+            output_valid <= 0;
+            output_data_0 <= 0;
+            output_data_1 <= 0;
+            output_data_2 <= 0;
+            output_data_3 <= 0;
+            output_data_4 <= 0;
+            output_data_5 <= 0;
+            output_data_6 <= 0;
+            output_data_7 <= 0;
+        end else if (clear) begin
+            busy <= 0;
+            done <= 0;
+            output_valid <= 0;
+            output_data_0 <= 0;
+            output_data_1 <= 0;
+            output_data_2 <= 0;
+            output_data_3 <= 0;
+            output_data_4 <= 0;
+            output_data_5 <= 0;
+            output_data_6 <= 0;
+            output_data_7 <= 0;
         end else begin
-            state <= next_state;
-        end
-    end
-    
-    // =========================================================================
-    // 状态机 - 下一状态逻辑
-    // =========================================================================
-    
-    always @(*) begin
-        next_state = state;
-        
-        case (state)
-            IDLE: begin
-                if (start && input_valid && weight_valid) begin
-                    next_state = LOAD_DATA;
-                end
+            done <= 0;
+            output_valid <= 0;
+            busy <= compute_fire;
+
+            if (compute_fire) begin
+                output_data_0 <= i0 * weight_00 + i1 * weight_01 + i2 * weight_02 + i3 * weight_03 + i4 * weight_04 + i5 * weight_05 + i6 * weight_06 + i7 * weight_07;
+                output_data_1 <= i0 * weight_10 + i1 * weight_11 + i2 * weight_12 + i3 * weight_13 + i4 * weight_14 + i5 * weight_15 + i6 * weight_16 + i7 * weight_17;
+                output_data_2 <= i0 * weight_20 + i1 * weight_21 + i2 * weight_22 + i3 * weight_23 + i4 * weight_24 + i5 * weight_25 + i6 * weight_26 + i7 * weight_27;
+                output_data_3 <= i0 * weight_30 + i1 * weight_31 + i2 * weight_32 + i3 * weight_33 + i4 * weight_34 + i5 * weight_35 + i6 * weight_36 + i7 * weight_37;
+                output_data_4 <= i0 * weight_40 + i1 * weight_41 + i2 * weight_42 + i3 * weight_43 + i4 * weight_44 + i5 * weight_45 + i6 * weight_46 + i7 * weight_47;
+                output_data_5 <= i0 * weight_50 + i1 * weight_51 + i2 * weight_52 + i3 * weight_53 + i4 * weight_54 + i5 * weight_55 + i6 * weight_56 + i7 * weight_57;
+                output_data_6 <= i0 * weight_60 + i1 * weight_61 + i2 * weight_62 + i3 * weight_63 + i4 * weight_64 + i5 * weight_65 + i6 * weight_66 + i7 * weight_67;
+                output_data_7 <= i0 * weight_70 + i1 * weight_71 + i2 * weight_72 + i3 * weight_73 + i4 * weight_74 + i5 * weight_75 + i6 * weight_76 + i7 * weight_77;
+                output_valid <= 1;
+                done <= 1;
             end
-            
-            LOAD_DATA: begin
-                next_state = COMPUTE;
-            end
-            
-            COMPUTE: begin
-                if (compute_cnt >= MATRIX_SIZE) begin
-                    next_state = ACCUMULATE;
-                end
-            end
-            
-            ACCUMULATE: begin
-                next_state = OUTPUT;
-            end
-            
-            OUTPUT: begin
-                next_state = IDLE;
-            end
-            
-            default: begin
-                next_state = IDLE;
-            end
-        endcase
-    end
-    
-    // =========================================================================
-    // 状态机 - 输出逻辑
-    // =========================================================================
-    
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            busy <= 1'b0;
-            done <= 1'b0;
-            output_valid <= 1'b0;
-            pe_enable <= 1'b0;
-            pe_clear_acc <= 1'b0;
-            compute_cnt <= 0;
-            row_cnt <= 0;
-            col_cnt <= 0;
-        end else begin
-            // 默认值
-            done <= 1'b0;
-            output_valid <= 1'b0;
-            
-            case (state)
-                IDLE: begin
-                    busy <= 1'b0;
-                    pe_enable <= 1'b0;
-                    pe_clear_acc <= 1'b0;
-                    compute_cnt <= 0;
-                end
-                
-                LOAD_DATA: begin
-                    busy <= 1'b1;
-                    pe_clear_acc <= 1'b1;  // 清除累加器
-                    // 加载输入数据和权重
-                    for (row_cnt = 0; row_cnt < MATRIX_SIZE; row_cnt = row_cnt + 1) begin
-                        input_reg[row_cnt] <= input_data[row_cnt];
-                        for (col_cnt = 0; col_cnt < MATRIX_SIZE; col_cnt = col_cnt + 1) begin
-                            weight_reg[row_cnt][col_cnt] <= weight_data[row_cnt][col_cnt];
-                        end
-                    end
-                end
-                
-                COMPUTE: begin
-                    pe_clear_acc <= 1'b0;
-                    pe_enable <= 1'b1;
-                    compute_cnt <= compute_cnt + 1;
-                end
-                
-                ACCUMULATE: begin
-                    pe_enable <= 1'b0;
-                    // 等待最后的累加完成
-                end
-                
-                OUTPUT: begin
-                    busy <= 1'b0;
-                    done <= 1'b1;
-                    output_valid <= 1'b1;
-                    // 输出结果（每行的第一个PE的累加结果）
-                    for (row_cnt = 0; row_cnt < MATRIX_SIZE; row_cnt = row_cnt + 1) begin
-                        output_data[row_cnt] <= pe_acc_out[row_cnt][MATRIX_SIZE-1];
-                    end
-                end
-            endcase
         end
     end
 
 endmodule
-
-// =============================================================================
-// 模块说明
-// =============================================================================
-//
-// 功能描述：
-// 矩阵乘法单元是NPU的核心计算引擎，使用PE阵列实现高效的矩阵乘法。
-// 采用脉动阵列（Systolic Array）架构，数据从左到右流动。
-//
-// 工作原理：
-// 1. IDLE状态：等待start信号
-// 2. LOAD_DATA状态：加载输入数据和权重到内部寄存器
-// 3. COMPUTE状态：PE阵列执行矩阵乘法运算
-// 4. ACCUMULATE状态：等待累加完成
-// 5. OUTPUT状态：输出计算结果
-//
-// 脉动阵列结构：
-// - 8x8的PE阵列
-// - 输入数据从左侧进入，向右流动
-// - 权重数据固定在每个PE中
-// - 每个PE执行一次乘累加运算
-//
-// 计算过程：
-// 对于矩阵乘法 C = A × B
-// - A: 输入矩阵（1×8）
-// - B: 权重矩阵（8×8）
-// - C: 输出矩阵（1×8）
-// 每个输出元素 C[i] = Σ(A[j] × B[j][i])
-//
-// 性能：
-// - 吞吐量：每周期8个MAC操作
-// - 延迟：约8个周期（矩阵维度）
-// - 可扩展到更大的矩阵
-//
-// 接口协议：
-// - start: 上升沿触发计算开始
-// - input_valid/weight_valid: 数据有效标志
-// - done: 计算完成脉冲信号
-// - busy: 计算过程中保持高电平
-// - output_valid: 输出数据有效标志
-//
-// =============================================================================
